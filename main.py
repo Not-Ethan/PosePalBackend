@@ -1,60 +1,44 @@
 import os
-from dotenv import load_dotenv
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from flask_pymongo import PyMongo
-from bson import ObjectId
-import bcrypt
-import jwt
 import base64
-import datetime
+from datetime import datetime, timedelta
+from flask import Flask, request, jsonify
+from flask_sqlalchemy import SQLAlchemy
+from flask_bcrypt import Bcrypt
+from flask_cors import CORS
+import jwt
+from openai import OpenAI
+from dotenv import load_dotenv
+import hashlib
 
 # Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('MONGO_URI', 'sqlite:///posepal.db')
+app.config['SECRET_KEY'] = os.getenv('JWT_SECRET')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
+bcrypt = Bcrypt(app)
 CORS(app)
 
-# Configuration
-app.config['MONGO_URI'] = os.getenv('MONGO_URI', 'mongodb://localhost:27017/PostPal')
-app.config['SECRET_KEY'] = os.getenv('JWT_SECRET')
-app.config['JSON_SORT_KEYS'] = False
+# Omnistack OpenAI Client
+omnistack_client = OpenAI(
+    base_url="https://api.omnistack.sh/openai/v1", 
+    api_key=""
+)
 
-# MongoDB Connection
-mongo = PyMongo(app)
+# Models
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(50), unique=True, nullable=False)
+    password = db.Column(db.String(255), nullable=False)
+    score = db.Column(db.Integer, default=0)
 
-# User Model
-class User:
-    @staticmethod
-    def register(username, password):
-        existing_user = mongo.db.users.find_one({'username': username})
-        if existing_user:
-            return None
 
-        # Hash password
-        hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
-        user_data = {
-            'username': username,
-            'password': hashed_password,
-            'score': 0
-        }
-        return mongo.db.users.insert_one(user_data)
-
-    @staticmethod
-    def login(username, password):
-        user = mongo.db.users.find_one({'username': username})
-        if user and bcrypt.checkpw(password.encode('utf-8'), user['password']):
-            token = jwt.encode(
-                {'userId': str(user['_id']), 'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=1)}, 
-                app.config['SECRET_KEY'], 
-                algorithm='HS256'
-            )
-            return token
-        return None
-
-# Authentication Decorator
+# Authentication Middleware
 def token_required(f):
-    def decorator(*args, **kwargs):
+    def decorated(*args, **kwargs):
         token = None
         if 'Authorization' in request.headers:
             token = request.headers['Authorization'].split(" ")[1]
@@ -64,125 +48,162 @@ def token_required(f):
         
         try:
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
-            current_user_id = ObjectId(data['userId'])
+            current_user = User.query.filter_by(id=data['user_id']).first()
         except jwt.ExpiredSignatureError:
             return jsonify({'message': 'Token has expired'}), 401
         except jwt.InvalidTokenError:
             return jsonify({'message': 'Invalid Token'}), 401
         
-        return f(current_user_id, *args, **kwargs)
-    return decorator
+        return f(current_user, *args, **kwargs)
+    return decorated
 
-# Routes
+# Route Handlers
 @app.route('/register', methods=['POST'])
 def register():
-    data = request.get_json()
+    data = request.json
     username = data.get('username')
     password = data.get('password')
 
     if not username or not password:
         return jsonify({'message': 'Username and password are required'}), 400
 
-    result = User.register(username, password)
-    if result:
-        return jsonify({'message': 'User registered successfully'}), 201
-    else:
+    existing_user = User.query.filter_by(username=username).first()
+    if existing_user:
         return jsonify({'message': 'Username already exists'}), 400
+
+    hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
+    new_user = User(username=username, password=hashed_password)
+    
+    db.session.add(new_user)
+    db.session.commit()
+
+    return jsonify({'message': 'User registered successfully'}), 201
 
 @app.route('/login', methods=['POST'])
 def login():
-    data = request.get_json()
+    data = request.json
     username = data.get('username')
     password = data.get('password')
 
-    if not username or not password:
-        return jsonify({'message': 'Username and password are required'}), 400
-
-    token = User.login(username, password)
-    if token:
-        return jsonify({'token': token, 'message': 'Login successful'})
-    else:
+    user = User.query.filter_by(username=username).first()
+    if not user or not bcrypt.check_password_hash(user.password, password):
         return jsonify({'message': 'Invalid username or password'}), 400
 
-@app.route('/gallery', methods=['GET'])
-@token_required
-def get_gallery(current_user_id):
-    images = list(mongo.db.images.find({'user': current_user_id}).sort('createdAt', -1))
-    for image in images:
-        image['_id'] = str(image['_id'])
-    return jsonify({'images': images})
+    token = jwt.encode({
+        'user_id': user.id, 
+        'exp': datetime.utcnow() + timedelta(hours=1)
+    }, app.config['SECRET_KEY'], algorithm='HS256')
+
+    return jsonify({'token': token, 'message': 'Login successful'})
 
 @app.route('/score', methods=['GET'])
 @token_required
-def get_score(current_user_id):
-    user = mongo.db.users.find_one({'_id': current_user_id}, {'score': 1})
-    if user:
-        return jsonify({'score': user['score']})
-    return jsonify({'message': 'User not found'}), 404
+def get_score(current_user):
+    return jsonify({'score': current_user.score})
 
 @app.route('/score', methods=['POST'])
 @token_required
-def update_score(current_user_id):
-    data = request.get_json()
+def update_score(current_user):
+    data = request.json
     score = data.get('score')
 
-    if not isinstance(score, (int, float)):
+    if not isinstance(score, int):
         return jsonify({'message': 'Score must be a number'}), 400
 
-    result = mongo.db.users.update_one(
-        {'_id': current_user_id},
-        {'$set': {'score': score}}
-    )
+    current_user.score = score
+    db.session.commit()
 
-    if result.modified_count:
-        user = mongo.db.users.find_one({'_id': current_user_id}, {'score': 1})
-        return jsonify({'score': user['score']})
-    
-    return jsonify({'message': 'User not found'}), 404
+    return jsonify({'score': current_user.score})
 
 @app.route('/upload', methods=['POST'])
 @token_required
-def upload_image(current_user_id):
-    data = request.get_json()
+def upload_image(current_user):
+    data = request.json
     image = data.get('image')
     title = data.get('title', 'Untitled')
 
     if not image:
         return jsonify({'message': 'Image data is required'}), 400
 
+    # Validate Base64 format
     try:
-        # Validate Base64 string
-        header, encoded = image.split(",", 1)
-        content_type = header.split(":")[1].split(";")[0]
+        header, encoded = image.split(";base64,")
+        content_type = header.split(":")[1]
         
-        # Decode and check file size
-        decoded_image = base64.b64decode(encoded)
-        file_size_mb = len(decoded_image) / (1024 * 1024)
-        
-        if file_size_mb > 5:
+        # Validate file size
+        decoded = base64.b64decode(encoded)
+        size_mb = len(decoded) / (1024 * 1024)
+        if size_mb > 5:
             return jsonify({'message': 'Image size exceeds 5MB limit'}), 400
 
-        # Save image
-        image_data = {
-            'user': current_user_id,
-            'title': title,
-            'data': encoded,
-            'contentType': content_type,
-            'createdAt': datetime.datetime.utcnow()
-        }
-        result = mongo.db.images.insert_one(image_data)
+        new_image = Image(
+            user_id=current_user.id, 
+            title=title, 
+            data=encoded, 
+            content_type=content_type
+        )
         
+        db.session.add(new_image)
+        db.session.commit()
+
         return jsonify({
             'message': 'Image uploaded successfully', 
             'image': {
-                '_id': str(result.inserted_id),
-                'title': title
+                'id': new_image.id, 
+                'title': new_image.title
             }
         }), 201
 
     except Exception as e:
-        return jsonify({'message': 'Server Error', 'error': str(e)}), 500
+        return jsonify({'message': 'Invalid image format'}), 400
+
+@app.route('/prompt', methods=['GET'])
+@token_required
+def get_prompt(current_user):
+    try:
+        # Generate daily prompt based on current date
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        # Use hash to deterministically generate a daily prompt
+        daily_prompt_seed = hashlib.md5(today.encode()).hexdigest()
+        
+        # Generate daily prompt using Omnistack
+        daily_prompt_response = omnistack_client.chat.completions.create(
+            model="belle_belle_concepcion",
+            messages=[
+                {"role": "system", "content": "Generate a unique daily photo pose suggestion based on a seed."},
+                {"role": "user", "content": f"Create a creative pose suggestion using this seed: {daily_prompt_seed}"}
+            ]
+        )
+        
+        daily_prompt = daily_prompt_response.choices[0].message.content
+
+        # Generate random prompts
+        random_prompts_response = omnistack_client.chat.completions.create(
+            model="belle_belle_concepcion",
+            messages=[
+                {"role": "system", "content": "Generate 3 unique, fun photo pose suggestions."},
+                {"role": "user", "content": "Suggest some creative and engaging photo poses."}
+            ]
+        )
+        
+        random_prompts = [
+            choice.message.content 
+            for choice in random_prompts_response.choices 
+            if choice.message.content
+        ]
+        
+        return jsonify({
+            'daily_prompt': daily_prompt,
+            'random_prompts': random_prompts
+        })
+    
+    except Exception as e:
+        return jsonify({'message': 'Error generating prompts', 'error': str(e)}), 500
+
+# Create tables
+with app.app_context():
+    db.create_all()
 
 if __name__ == '__main__':
-    port = int(os.getenv('PORT', 8000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(port=8000, debug=True)
