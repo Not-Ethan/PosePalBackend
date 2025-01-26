@@ -21,31 +21,16 @@ class PromptGenerator:
         self.client = api_client
         self.prompt_file = prompt_file
         self.prompt_template = prompt_template
-        self.system_prompt, self.user_prompt = self._load_prompt_template()
-
-    def _load_prompt_template(self):
-        """
-        Load system and user prompts from template file.
-        
-        File format expected:
-        ---SYSTEM---
-        System prompt content
-        ---USER---
-        User prompt content
-        """
-        try:
-            with open(self.prompt_template, 'r') as f:
-                content = f.read().split('---USER---')
-                system_prompt = content[0].replace('---SYSTEM---', '').strip()
-                user_prompt = content[1].strip()
-                return system_prompt, user_prompt
-        except Exception as e:
-            print(f"Error loading prompt template: {e}")
-            # Fallback to default prompts
-            return (
-                "Generate a creative, interpretive photo prompt that sparks imagination.",
-                "Create a thought-provoking photo prompt that inspires creativity."
-            )
+        self.system_prompt = '''
+Generate a single, precise photographic challenge that provides a unique directional prompt for image creation. Each prompt must:
+- Be clear, simple, and concise
+- Encourage users to have fun.
+- Give specific directions
+- Be one sentence long (~10 words)
+- Be accessible and easy to do for most people
+'''
+        self.user_prompt = '''
+Generate a creative photographic direction that meets the requirements.'''
 
     def load_prompts(self):
         """Load existing daily prompts from file."""
@@ -116,7 +101,7 @@ class PromptGenerator:
         except (FileNotFoundError, json.JSONDecodeError):
             # Generate prompt if file doesn't exist or is invalid
             prompt = self.generate_daily_prompt()
-            return {'date': today, 'prompt': prompt}
+            return {'date': today, 'prompt': prompt if prompt else 'This would be a default random prompt.'}
 
 def create_app():
     """Create and configure Flask application."""
