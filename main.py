@@ -7,26 +7,48 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 
+PORT = os.getenv('PORT', 8000)
+DEBUG = os.getenv('DEBUG', False)
+
 # Load environment variables
 load_dotenv()
 
 class PromptGenerator:
-    def __init__(self, api_client, prompt_file='daily_prompt.json'):
+    def __init__(self, api_client, prompt_file='daily_prompt.json', prompt_template='prompt.txt'):
         """
-        Initialize PromptGenerator with OpenAI client and prompt file path.
-        
-        :param api_client: OpenAI-compatible client for generating prompts
-        :param prompt_file: Path to the JSON file storing daily prompts
+        Initialize PromptGenerator with OpenAI client, prompt file paths.
         """
         self.client = api_client
         self.prompt_file = prompt_file
+        self.prompt_template = prompt_template
+        self.system_prompt, self.user_prompt = self._load_prompt_template()
+
+    def _load_prompt_template(self):
+        """
+        Load system and user prompts from template file.
+        
+        File format expected:
+        ---SYSTEM---
+        System prompt content
+        ---USER---
+        User prompt content
+        """
+        try:
+            with open(self.prompt_template, 'r') as f:
+                content = f.read().split('---USER---')
+                system_prompt = content[0].replace('---SYSTEM---', '').strip()
+                user_prompt = content[1].strip()
+                return system_prompt, user_prompt
+        except Exception as e:
+            print(f"Error loading prompt template: {e}")
+            # Fallback to default prompts
+            return (
+                "Generate a creative, interpretive photo prompt that sparks imagination.",
+                "Create a thought-provoking photo prompt that inspires creativity."
+            )
 
     def load_prompts(self):
-        """
-        Load existing daily prompts from file.
-        
-        :return: Dictionary of stored prompts
-        """
+        """Load existing daily prompts from file."""
         try:
             with open(self.prompt_file, 'r') as f:
                 return json.load(f)
@@ -34,91 +56,70 @@ class PromptGenerator:
             return {}
 
     def save_prompts(self, prompts):
-        """
-        Save prompts to JSON file.
-        
-        :param prompts: Dictionary of prompts to save
-        """
+        """Save prompts to JSON file."""
         with open(self.prompt_file, 'w') as f:
             json.dump(prompts, f, indent=2)
 
-    def generate_prompt(self, prompt_type='daily', num_prompts=1):
-        """
-        Generate prompt(s) using OpenAI client.
-        
-        :param prompt_type: Type of prompt generation (daily or random)
-        :param num_prompts: Number of prompts to generate
-        :return: Generated prompt(s)
-        """
+    def generate_creative_prompt(self):
+        """Generate a creative prompt using loaded template."""
         try:
-            # Determine system and user messages based on prompt type
-            system_messages = {
-                'daily': "Generate a unique, fun photo pose suggestion.",
-                'random': f"Generate {num_prompts} unique, fun photo pose suggestions."
-            }
-            
-            user_messages = {
-                'daily': "Suggest a creative and engaging photo pose.",
-                'random': "Suggest some creative and engaging photo poses."
-            }
-            
-            # Create prompt generation request
-            random_prompts_response = self.client.chat.completions.create(
+            prompt_generation_request = self.client.chat.completions.create(
                 model="donna_alfonso_damian",
                 messages=[
-                    {"role": "system", "content": system_messages.get(prompt_type, system_messages['daily'])},
-                    {"role": "user", "content": user_messages.get(prompt_type, user_messages['daily'])}
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": self.user_prompt}
                 ]
             )
             
-            # Extract and process prompts
-            prompts = [
-                choice.message.content 
-                for choice in random_prompts_response.choices 
-                if choice.message.content
-            ]
-            
-            # For daily prompt, save to file
-            if prompt_type == 'daily':
-                today = datetime.now().strftime('%Y-%m-%d')
-                stored_prompts = self.load_prompts()
-                stored_prompts[today] = prompts[0]
-                
-                # Prune old prompts (keep last 30 days)
-                cutoff_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
-                stored_prompts = {k: v for k, v in stored_prompts.items() if k >= cutoff_date}
-                
-                self.save_prompts(stored_prompts)
-                print(f"Generated daily prompt for {today}: {prompts[0]}")
-            
-            return prompts[0] if prompt_type == 'daily' else prompts
+            return prompt_generation_request.choices[0].message.content.strip()
         
         except Exception as e:
-            print(f"Error generating {prompt_type} prompt: {e}")
+            print(f"Error generating creative prompt: {e}")
             return None
 
-    def get_daily_prompt(self):
-        """
-        Retrieve today's prompt from the stored prompts file.
+    def generate_daily_prompt(self):
+        """Generate and save today's prompt."""
+        today = datetime.now().strftime('%Y-%m-%d')
+        prompt = self.generate_creative_prompt()
         
-        :return: Dictionary with date and prompt
-        """
+        if prompt:
+            # Load existing prompts
+            prompts = self.load_prompts()
+            
+            # Add today's prompt
+            prompts[today] = prompt
+            
+            # Prune old prompts (keep last 30 days)
+            cutoff_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+            prompts = {k: v for k, v in prompts.items() if k >= cutoff_date}
+            
+            # Save updated prompts
+            self.save_prompts(prompts)
+            print(f"Generated daily prompt for {today}: {prompt}")
+            
+        return prompt
+
+    def get_daily_prompt(self):
+        """Retrieve today's prompt from the stored prompts file."""
         today = datetime.now().strftime('%Y-%m-%d')
         try:
             with open(self.prompt_file, 'r') as f:
-                prompt = json.load(f).get(today)
+                prompts = json.load(f)
+                
+                # If no prompt for today, generate one
+                if today not in prompts:
+                    prompt = self.generate_daily_prompt()
+                else:
+                    prompt = prompts[today]
+                
                 return {'date': today, 'prompt': prompt}
-        except FileNotFoundError:
-            return "Daily prompt file not found"
-        except json.JSONDecodeError:
-            return "Error reading daily prompt file"
+        except (FileNotFoundError, json.JSONDecodeError):
+            # Generate prompt if file doesn't exist or is invalid
+            prompt = self.generate_daily_prompt()
+            return {'date': today, 'prompt': prompt}
 
 def create_app():
-    """
-    Create and configure Flask application.
-    
-    :return: Configured Flask app
-    """
+    """Create and configure Flask application."""
     app = Flask(__name__)
     CORS(app)
 
@@ -139,21 +140,17 @@ def create_app():
 
     @app.route('/prompt/random', methods=['GET'])
     def random_prompt():
-        """Route to generate random prompts."""
+        """Route to generate a random prompt."""
         try:
-            random_prompts = prompt_generator.generate_prompt(prompt_type='random', num_prompts=3)
-            return jsonify({'random_prompts': random_prompts})
+            random_prompt = prompt_generator.generate_creative_prompt()
+            return jsonify({'random_prompt': random_prompt})
         except Exception as e:
-            return jsonify({'message': 'Error generating random prompts', 'error': str(e)}), 500
+            return jsonify({'message': 'Error generating random prompt', 'error': str(e)}), 500
 
-    # Setup scheduler
+    # Setup scheduler to generate daily prompt at midnight
     scheduler = BackgroundScheduler()
-    scheduler.add_job(lambda: prompt_generator.generate_prompt(prompt_type='daily'), 'cron', hour=0, minute=0)
+    scheduler.add_job(prompt_generator.generate_daily_prompt, 'cron', hour=0, minute=0)
     scheduler.start()
-
-    # Create daily prompt file if it doesn't exist
-    if not os.path.exists(prompt_generator.prompt_file):
-        prompt_generator.generate_prompt(prompt_type='daily')
 
     return app
 
@@ -161,4 +158,4 @@ def create_app():
 app = create_app()
 
 if __name__ == '__main__':
-    app.run(port=8000, debug=True)
+    app.run(port=PORT, debug=DEBUG, host="0.0.0.0")

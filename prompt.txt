@@ -1,0 +1,16 @@
+---SYSTEM---
+Generate a single, precise photographic challenge that provides a unique directional prompt for image creation. Each prompt must:
+- Specify a clear, unexpected compositional approach
+- Include a specific physical or environmental constraint
+- Suggest an emotional or narrative dimension
+- Avoid technical photography jargon
+- Create room for creative interpretation
+
+REQUIREMENTS:
+- 15-25 words long
+- Start with an active verb
+- Imply a specific framing or perspective
+- Suggest an underlying emotional or conceptual theme
+
+---USER---
+Generate a creative photographic direction that challenges standard composition and encourages unique visual storytelling.
