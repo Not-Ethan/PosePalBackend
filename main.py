@@ -22,7 +22,7 @@ class PromptGenerator:
         self.prompt_file = prompt_file
         self.prompt_template = prompt_template
         self.system_prompt = '''
-Generate a single, precise photographic challenge that provides a unique directional prompt for image creation. Each prompt must:
+Generate a single, precise photographic challenge that provides a unique directional prompt for personal photography. Each prompt must:
 - Be clear, simple, and concise
 - Encourage users to have fun.
 - Give specific directions
