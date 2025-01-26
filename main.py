@@ -3,12 +3,14 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 from openai import OpenAI
 from dotenv import load_dotenv
-
+from apscheduler.schedulers.background import BackgroundScheduler
 PORT = os.getenv('PORT', 8000)
 DEBUG = os.getenv('DEBUG', False)
 
 # Load environment variables
 load_dotenv()
+
+DAILY_PROMPT = None
 
 class PromptGenerator:
     def __init__(self, api_client):
@@ -23,8 +25,9 @@ Generate a single, precise photographic challenge that provides a unique directi
 - Be clear, simple, and concise
 - Encourage users to have fun.
 - Give specific directions
-- Be one sentence long (~10 words)
+- Be one sentence long (~15 words)
 - Be accessible and easy to do for most people
+- THE SUBJECT OF THE PHOTO SHOULD BE THE USER
 '''
         self.user_prompt = '''
 Generate a creative photographic direction that meets the requirements.
@@ -77,7 +80,10 @@ Provide a helpful photo-taking tip that photographers can apply in their daily p
         except Exception as e:
             print(f"Error generating creative tip: {e}")
             return None
-
+    def generate_daily_prompt(self):
+        """Generate a new daily prompt and store it in global variable."""
+        global DAILY_PROMPT
+        DAILY_PROMPT = self.generate_creative_prompt()
 def create_app():
     """Create and configure Flask application."""
     app = Flask(__name__)
@@ -95,10 +101,12 @@ def create_app():
     @app.route('/prompt/daily', methods=['GET'])
     def daily_prompt():
         """Route to retrieve a new daily prompt."""
-        prompt = prompt_generator.generate_creative_prompt()
-        if prompt is None:
-            # Provide a default prompt if generation fails
-            prompt = "Capture the beauty of a sunset."
+        if not DAILY_PROMPT:
+            prompt_generator.generate_daily_prompt()
+        prompt = DAILY_PROMPT
+        if not prompt:
+            prompt = "Capture the beauty of a sunset with a friend."
+        
         return jsonify({'prompt': prompt})
 
     @app.route('/prompt/random', methods=['GET'])
@@ -122,6 +130,10 @@ def create_app():
             tip = "Remember to check your camera settings before shooting."
         return jsonify({'tip': tip})
 
+    # Setup scheduler to generate daily prompt at midnight
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(prompt_generator.generate_daily_prompt, 'cron', hour=0, minute=0)
+    scheduler.start()
     return app
 
 # Application entry point
